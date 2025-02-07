@@ -1,0 +1,129 @@
+import traci  # SUMO control
+import pygame  # GUI for speedometer
+import time
+import pyttsx3  # Text-to-Speech engine
+import datetime  # For logging
+import winsound  # Warning beep (Windows only)
+import os
+import tkinter as tk
+from tkinter import messagebox
+
+# Initialize TTS engine
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)  # Set speech speed
+
+# Function to set male voice
+def set_male_voice():
+    voices = engine.getProperty('voices')
+    for voice in voices:
+        if "male" in voice.name.lower():
+            engine.setProperty('voice', voice.id)
+            return
+    print("Warning: No male voice found. Using default.")
+
+set_male_voice()
+
+# Function to show GUI alerts for critical events
+def show_alert(message):
+    root = tk.Tk()
+    root.withdraw()  # Hide root window
+    messagebox.showwarning("PTC Alert", message)  # Warning pop-up
+
+# Function to log only emergency events
+LOG_FILE = "ptc_log.txt"
+
+def log_event(event_text):
+    timestamp = datetime.datetime.now().strftime("%H:%M %m/%d/%Y")
+    log_entry = f"[{timestamp}] {event_text}\n"
+
+    # Log only if it's an emergency or safety activation
+    with open(LOG_FILE, "a") as log_file:
+        log_file.write(log_entry)
+
+    print(log_entry.strip())  # Print to console for debugging
+
+# Function to play a warning beep
+def warning_beep():
+    duration = 500  # milliseconds
+    frequency = 1000  # Hz
+    try:
+        winsound.Beep(frequency, duration)  # Windows beep
+    except:
+        print("[Warning Beep] Beep sound not supported on this OS.")
+
+# Function to speak alerts, beep, and log emergencies
+def speak(text, emergency=False):
+    warning_beep()  # Play warning beep before alert
+    if emergency:
+        log_event(text)  # Log only emergency/safety events
+        show_alert(text)  # Show GUI alert for critical events
+    engine.say(text)
+    engine.runAndWait()
+
+# PTC System Settings
+BRAKING_DISTANCE = 200  # Distance to start braking
+REMOTE_TAKEOVER = False  # Remote takeover trigger
+RCDSYS_ACTIVE = False  # Runaway detection system for electric trains
+MAX_SPEED = 80  # Train max speed in MPH
+
+# Initialize PyGame for the speedometer
+pygame.init()
+screen = pygame.display.set_mode((400, 200))
+pygame.display.set_caption("PTC Speedometer")
+font = pygame.font.Font(None, 36)
+
+# Function to draw the speedometer with flashing red alert
+def draw_speedometer(speed, is_critical):
+    screen.fill((0, 0, 0))
+    
+    # Determine speed zone (Green, Yellow, Red)
+    if speed <= 60:
+        color = (0, 255, 0)  # Green: Safe
+    elif 60 < speed <= 70:
+        color = (255, 255, 0)  # Yellow: Cautionary
+    else:
+        # Flashing red for critical condition
+        color = (255, 0, 0) if is_critical else (0, 0, 0)
+    
+    speed_text = font.render(f"Speed: {speed:.2f} MPH", True, color)
+    screen.blit(speed_text, (50, 80))
+    pygame.display.flip()
+
+# Function to monitor train and apply PTC logic
+def monitor_train():
+    traci.vehicle.subscribe("train1", [traci.constants.VAR_SPEED, traci.constants.VAR_DISTANCE])
+
+    while traci.simulation.getMinExpectedNumber() > 0:
+        traci.simulationStep()
+        
+        # Get train data
+        speed = traci.vehicle.getSpeed("train1") * 2.237  # Convert m/s to MPH
+        distance = traci.vehicle.getDistance("train1")
+
+        # Flash the red alert when speed exceeds the threshold
+        is_critical = speed > 70  # Critical speed (greater than 70 MPH)
+        
+        draw_speedometer(speed, is_critical)  # Update speedometer with flashing effect
+
+        # PTC Braking System
+        if distance < BRAKING_DISTANCE:
+            speak("Warning: Train ahead. Reducing speed.", emergency=True)
+            traci.vehicle.slowDown("train1", speed * 0.8, 5)  # Reduce speed by 20%
+
+        # Remote Takeover
+        if REMOTE_TAKEOVER:
+            speak("Emergency stop activated by remote control.", emergency=True)
+            traci.vehicle.slowDown("train1", 0, 5)
+
+        # Runaway Consist Detection System (RCDSYS)
+        if RCDSYS_ACTIVE and speed > 70:  # Detect if train is out of control
+            speak("Warning: Runaway detected. Lowering pantograph and stopping.", emergency=True)
+            traci.vehicle.setSpeed("train1", 0)
+
+        time.sleep(0.1)  # Small delay to keep simulation smooth
+
+    traci.close()
+
+# Start SUMO and PTC System
+traci.start(["sumo-gui", "-n", "railway.net.xml", "-r", "train.rou.xml"])
+monitor_train()
